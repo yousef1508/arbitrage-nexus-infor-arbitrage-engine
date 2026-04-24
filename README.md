@@ -1,6 +1,6 @@
 # Arbitrage Nexus: Information Arbitrage Engine
 
-[aureliabutton]
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https%3A%2F%2Fgithub.com%2Fyousef1508%2Farbitrage-nexus-infor-arbitrage-engine)
 
 Arbitrage Nexus is a private, high-fidelity autonomous intelligence and profit execution system designed for a single owner. It leverages a multi-agent architecture to scan the digital landscape for information asymmetries and monetize them across various channels including content arbitrage, affiliate marketing, and lead generation.
 
@@ -72,7 +72,7 @@ The system is designed with a four-layer multi-agent structure:
 
 The project is designed to be deployed as a Cloudflare Worker using the Agents SDK.
 
-[aureliabutton]
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https%3A%2F%2Fgithub.com%2Fyousef1508%2Farbitrage-nexus-infor-arbitrage-engine)
 
 To manually deploy:
 ```bash
