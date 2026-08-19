@@ -4,12 +4,18 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port ${PORT:-3000}",
+    "dev": "vite --host 0.0.0.0 --port 3000",
     "build": "vite build",
+    "typecheck": "tsc --noEmit --pretty false",
     "lint": "eslint --cache -f json --quiet .",
-    "preview": "bun run build && vite preview --host 0.0.0.0 --port ${PORT:-4173}",
+    "preview": "bun run build && vite preview --host 0.0.0.0 --port 4173",
     "deploy": "bun run build && wrangler deploy",
-    "cf-typegen": "wrangler types"
+    "deploy:prod": "powershell -ExecutionPolicy Bypass -File scripts/deploy-production.ps1",
+    "check:prod": "powershell -ExecutionPolicy Bypass -File scripts/check-production.ps1",
+    "secrets:prod": "powershell -ExecutionPolicy Bypass -File scripts/set-cloudflare-secrets.ps1",
+    "cf-typegen": "wrangler types",
+    "worker:types": "wrangler types",
+    "verify": "bun run typecheck && bun run build"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -49,7 +55,7 @@
     "@tanstack/react-query": "^5.83.0",
     "@typescript-eslint/eslint-plugin": "^8.38.0",
     "@typescript-eslint/parser": "^8.38.0",
-    "agents": "^0.0.109",
+    "agents": "^0.12.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -66,6 +72,7 @@
     "mcp-remote": "^0.1.18",
     "next-themes": "^0.4.6",
     "openai": "^5.10.1",
+    "partyserver": "^0.5.5",
     "pino": "^9.11.0",
     "react": "^18.3.1",
     "react-day-picker": "^9.8.0",
@@ -85,12 +92,11 @@
     "uuid": "^11.1.0",
     "vaul": "^1.1.2",
     "zod": "^4.0.5",
-    "zustand": "^5.0.12",
-    "wrangler": "4.39.0"
+    "zustand": "^5.0.12"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.12.4",
-    "@cloudflare/workers-types": "4.20250424.0",
+    "@cloudflare/workers-types": "^4.20260504.1",
     "@eslint/js": "^9.22.0",
     "@types/node": "^22.15.3",
     "@types/react": "^18.3.1",
@@ -105,6 +111,7 @@
     "tailwindcss": "^3.4.17",
     "typescript": "5.8",
     "typescript-eslint": "^8.26.1",
-    "vite": "6.3.6"
+    "vite": "6.3.6",
+    "wrangler": "^4.87.0"
   }
 }

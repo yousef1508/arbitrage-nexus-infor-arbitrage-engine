@@ -22,11 +22,11 @@ export const CONFIG = {
   // 💰 Treasury Settings
   TREASURY: {
     BUCKETS: {
-      RESERVE: 0.40,      // 40%
+      RESERVE: 0.20,      // 20%
       OPERATING: 0.20,    // 20%
       REINVESTMENT: 0.15, // 15%
-      TAX_BUFFER: 0.15,   // 15%
-      OWNER: 0.10         // 10%
+      TAX_BUFFER: 0.30,   // 30%
+      OWNER: 0.15         // 15%
     },
     MIN_WITHDRAWAL: 50.00
   }

@@ -1,0 +1,492 @@
+﻿export type AdminAuthEnv = Record<string, unknown>;
+
+export type AdminAuthMode =
+  | 'local_bypass'
+  | 'cloudflare_access'
+  | 'admin_token'
+  | 'none';
+
+export type AdminAuthResult = {
+  authorized: boolean;
+  mode: AdminAuthMode;
+  admin_email?: string;
+  local_request: boolean;
+  reason?: string;
+};
+
+export type AdminGuardOptions = {
+  allow_options?: boolean;
+  drain_body_on_denial?: boolean;
+  expose_cors?: boolean;
+};
+
+export type AdminAuthHeaderNames = {
+  authorization: 'authorization';
+  admin_token: 'x-admin-api-token';
+  legacy_admin_token: 'x-nexus-admin-token';
+  cloudflare_access_email: 'cf-access-authenticated-user-email';
+  owner_auth_mode: 'x-owner-auth-mode';
+};
+
+export const ADMIN_AUTH_HEADERS: AdminAuthHeaderNames = {
+  authorization: 'authorization',
+  admin_token: 'x-admin-api-token',
+  legacy_admin_token: 'x-nexus-admin-token',
+  cloudflare_access_email: 'cf-access-authenticated-user-email',
+  owner_auth_mode: 'x-owner-auth-mode'
+};
+
+function cleanText(value: unknown): string {
+  return String(value ?? '')
+    .replace(/\uFFFD/g, '')
+    .replace(/�/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function lowerText(value: unknown): string {
+  return cleanText(value).toLowerCase();
+}
+
+export function truthy(value: unknown): boolean {
+  return ['true', '1', 'yes', 'y', 'on', 'enabled'].includes(lowerText(value));
+}
+
+export function disabled(value: unknown): boolean {
+  return ['false', '0', 'no', 'n', 'off', 'disabled'].includes(lowerText(value));
+}
+
+function envString(env: AdminAuthEnv | undefined, keys: string[], fallback = ''): string {
+  if (!env) return fallback;
+
+  for (const key of keys) {
+    const value = env[key];
+
+    if (value === undefined || value === null) {
+      continue;
+    }
+
+    const text = cleanText(value);
+
+    if (text) {
+      return text;
+    }
+  }
+
+  return fallback;
+}
+
+export function getConfiguredAdminEmail(env?: AdminAuthEnv): string {
+  return lowerText(
+    envString(env, [
+      'ADMIN_EMAIL',
+      'OWNER_EMAIL',
+      'PUBLIC_ADMIN_EMAIL'
+    ])
+  );
+}
+
+export function getConfiguredAdminToken(env?: AdminAuthEnv): string {
+  return envString(env, [
+    'ADMIN_API_TOKEN',
+    'OWNER_API_TOKEN',
+    'NEXUS_ADMIN_TOKEN'
+  ]);
+}
+
+export function localAdminBypassEnabled(env?: AdminAuthEnv): boolean {
+  return truthy(
+    envString(env, [
+      'ALLOW_LOCAL_ADMIN_BYPASS',
+      'ADMIN_ALLOW_LOCAL_BYPASS',
+      'LOCAL_ADMIN_BYPASS'
+    ])
+  );
+}
+
+export function isLocalRequest(url: string): boolean {
+  let host = '';
+
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+
+  return (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host.startsWith('192.168.') ||
+    host.startsWith('10.') ||
+    host.startsWith('172.16.') ||
+    host.startsWith('172.17.') ||
+    host.startsWith('172.18.') ||
+    host.startsWith('172.19.') ||
+    host.startsWith('172.20.') ||
+    host.startsWith('172.21.') ||
+    host.startsWith('172.22.') ||
+    host.startsWith('172.23.') ||
+    host.startsWith('172.24.') ||
+    host.startsWith('172.25.') ||
+    host.startsWith('172.26.') ||
+    host.startsWith('172.27.') ||
+    host.startsWith('172.28.') ||
+    host.startsWith('172.29.') ||
+    host.startsWith('172.30.') ||
+    host.startsWith('172.31.')
+  );
+}
+
+export function getBearerToken(authHeader: string | null | undefined): string {
+  if (!authHeader) return '';
+
+  const trimmed = authHeader.trim();
+
+  if (trimmed.toLowerCase().startsWith('bearer ')) {
+    return trimmed.slice('bearer '.length).trim();
+  }
+
+  return '';
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (!a || !b) return false;
+
+  let mismatch = a.length ^ b.length;
+  const maxLength = Math.max(a.length, b.length);
+
+  for (let index = 0; index < maxLength; index += 1) {
+    const codeA = index < a.length ? a.charCodeAt(index) : 0;
+    const codeB = index < b.length ? b.charCodeAt(index) : 0;
+    mismatch |= codeA ^ codeB;
+  }
+
+  return mismatch === 0;
+}
+
+function headerValue(request: Request, name: string): string {
+  return cleanText(request.headers.get(name));
+}
+
+export function getCloudflareAccessEmail(request: Request): string {
+  return lowerText(
+    headerValue(request, ADMIN_AUTH_HEADERS.cloudflare_access_email)
+  );
+}
+
+export function getRequestAdminToken(request: Request): string {
+  const bearer = getBearerToken(
+    request.headers.get(ADMIN_AUTH_HEADERS.authorization)
+  );
+
+  if (bearer) {
+    return bearer;
+  }
+
+  return (
+    headerValue(request, ADMIN_AUTH_HEADERS.admin_token) ||
+    headerValue(request, ADMIN_AUTH_HEADERS.legacy_admin_token)
+  );
+}
+
+export function authorizeOwnerRequest(
+  request: Request,
+  env?: AdminAuthEnv
+): AdminAuthResult {
+  const localRequest = isLocalRequest(request.url);
+
+  if (localAdminBypassEnabled(env) && localRequest) {
+    return {
+      authorized: true,
+      mode: 'local_bypass',
+      local_request: true,
+      reason: 'Local admin bypass is enabled for this request origin.'
+    };
+  }
+
+  const configuredEmail = getConfiguredAdminEmail(env);
+  const accessEmail = getCloudflareAccessEmail(request);
+
+  if (configuredEmail && accessEmail && accessEmail === configuredEmail) {
+    return {
+      authorized: true,
+      mode: 'cloudflare_access',
+      admin_email: accessEmail,
+      local_request: localRequest,
+      reason: 'Cloudflare Access authenticated email matched configured admin email.'
+    };
+  }
+
+  const expectedToken = getConfiguredAdminToken(env);
+  const suppliedToken = getRequestAdminToken(request);
+
+  if (expectedToken && suppliedToken && constantTimeEqual(expectedToken, suppliedToken)) {
+    return {
+      authorized: true,
+      mode: 'admin_token',
+      local_request: localRequest,
+      reason: 'Admin API token matched.'
+    };
+  }
+
+  return {
+    authorized: false,
+    mode: 'none',
+    admin_email: accessEmail || undefined,
+    local_request: localRequest,
+    reason:
+      configuredEmail || expectedToken
+        ? 'No valid owner authentication was supplied.'
+        : 'No owner authentication method is configured.'
+  };
+}
+
+export function isOwnerAuthorized(request: Request, env?: AdminAuthEnv): boolean {
+  return authorizeOwnerRequest(request, env).authorized;
+}
+
+export function ownerAuthModeHeader(result: AdminAuthResult): string {
+  return result.authorized ? result.mode : 'none';
+}
+
+export function withOwnerAuthHeaders(
+  response: Response,
+  result: AdminAuthResult
+): Response {
+  const headers = new Headers(response.headers);
+  headers.set(ADMIN_AUTH_HEADERS.owner_auth_mode, ownerAuthModeHeader(result));
+
+  if (result.admin_email) {
+    headers.set('x-owner-email', result.admin_email);
+  }
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
+export function corsHeaders(extra?: HeadersInit): Headers {
+  const headers = new Headers(extra);
+
+  headers.set('Access-Control-Allow-Origin', '*');
+  headers.set('Access-Control-Allow-Headers', [
+    'Content-Type',
+    'Authorization',
+    'X-Admin-Api-Token',
+    'X-Nexus-Admin-Token'
+  ].join(', '));
+  headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  headers.set('Access-Control-Max-Age', '86400');
+
+  return headers;
+}
+
+export function adminJsonResponse(
+  body: unknown,
+  init: ResponseInit = {}
+): Response {
+  const headers = new Headers(init.headers);
+  headers.set('Content-Type', 'application/json; charset=utf-8');
+  headers.set('Cache-Control', headers.get('Cache-Control') || 'no-store');
+
+  return new Response(JSON.stringify(body, null, 2), {
+    ...init,
+    headers
+  });
+}
+
+export function adminCorsJsonResponse(
+  body: unknown,
+  init: ResponseInit = {}
+): Response {
+  return adminJsonResponse(body, {
+    ...init,
+    headers: corsHeaders(init.headers)
+  });
+}
+
+export function adminPreflightResponse(init: ResponseInit = {}): Response {
+  return new Response(null, {
+    status: init.status || 204,
+    headers: corsHeaders(init.headers)
+  });
+}
+
+export function authRequiredResponse(
+  request?: Request,
+  result?: AdminAuthResult,
+  init: ResponseInit = {}
+): Response {
+  const method = request?.method?.toUpperCase?.() || 'GET';
+  const localRequest = request ? isLocalRequest(request.url) : false;
+
+  // Local non-GET denial keeps dev tooling from crashing on failed POST probes,
+  // while still returning a clear unauthorized JSON payload.
+  const status =
+    localRequest && !['GET', 'HEAD', 'OPTIONS'].includes(method)
+      ? 200
+      : init.status || 401;
+
+  return adminCorsJsonResponse(
+    {
+      success: false,
+      error: 'AUTH_REQUIRED',
+      authorized: false,
+      owner_auth_mode: result?.mode || 'none',
+      local_dev_denial: status === 200,
+      message:
+        'This route is private. Use Cloudflare Access or ADMIN_API_TOKEN. Public access is only allowed for report/feed/payment-verification routes.'
+    },
+    {
+      ...init,
+      status
+    }
+  );
+}
+
+export async function drainRequestBodySafely(request: Request): Promise<void> {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase())) {
+    return;
+  }
+
+  try {
+    await request.text();
+  } catch {
+    // The request is still unauthorized. Body-drain failures are not actionable.
+  }
+}
+
+export async function requireOwnerRequest(
+  request: Request,
+  env?: AdminAuthEnv,
+  options: AdminGuardOptions = {}
+): Promise<Response | null> {
+  const method = request.method.toUpperCase();
+
+  if (method === 'OPTIONS' && options.allow_options !== false) {
+    return adminPreflightResponse();
+  }
+
+  const result = authorizeOwnerRequest(request, env);
+
+  if (result.authorized) {
+    return null;
+  }
+
+  if (options.drain_body_on_denial !== false) {
+    await drainRequestBodySafely(request);
+  }
+
+  return authRequiredResponse(request, result);
+}
+
+export function isOwnerControlPlaneRoute(pathname: string): boolean {
+  return (
+    pathname.startsWith('/api/system/') ||
+    pathname.startsWith('/api/treasury/') ||
+    pathname.startsWith('/api/chat/') ||
+    pathname.startsWith('/api/admin/') ||
+    pathname.startsWith('/api/governor/')
+  );
+}
+
+export function isPublicReportRoute(pathname: string): boolean {
+  return pathname.startsWith('/reports/') || pathname.startsWith('/api/reports/');
+}
+
+export function isPublicMarketRoute(pathname: string, method: string): boolean {
+  const normalizedMethod = method.toUpperCase();
+
+  if (normalizedMethod === 'OPTIONS') {
+    return true;
+  }
+
+  if (normalizedMethod === 'GET' || normalizedMethod === 'HEAD') {
+    return (
+      pathname === '/' ||
+      pathname === '/reports' ||
+      pathname === '/reports.json' ||
+      pathname === '/signals.json' ||
+      pathname === '/opportunities.json' ||
+      pathname === '/feed.xml' ||
+      pathname === '/feed.json' ||
+      pathname === '/feed.atom' ||
+      pathname === '/discovery.json' ||
+      pathname === '/sitemap.xml' ||
+      pathname === '/robots.txt' ||
+      isPublicReportRoute(pathname) ||
+
+      pathname === '/api/health' ||
+      pathname === '/api/reports' ||
+      pathname === '/api/reports.json' ||
+      pathname === '/api/signals.json' ||
+      pathname === '/api/opportunities.json' ||
+      pathname === '/api/feed.xml' ||
+      pathname === '/api/feed.json' ||
+      pathname === '/api/feed.atom' ||
+      pathname === '/api/discovery.json' ||
+      pathname === '/api/sitemap.xml' ||
+      pathname === '/api/robots.txt' ||
+      pathname.startsWith('/api/earning-assets/')
+    );
+  }
+
+  if (normalizedMethod === 'POST') {
+    return (
+      pathname === '/api/client-errors' ||
+      (pathname.startsWith('/reports/') && pathname.endsWith('/verify-payment')) ||
+      (pathname.startsWith('/api/reports/') && pathname.endsWith('/verify-payment')) ||
+      (pathname.startsWith('/api/earning-assets/') && pathname.endsWith('/verify-payment'))
+    );
+  }
+
+  return false;
+}
+
+export async function preRouteOwnerGuard(
+  request: Request,
+  env?: AdminAuthEnv
+): Promise<Response | null> {
+  let pathname = '/';
+
+  try {
+    pathname = new URL(request.url).pathname;
+  } catch {
+    pathname = '/';
+  }
+
+  const method = request.method.toUpperCase();
+
+  if (method === 'OPTIONS') {
+    return adminPreflightResponse();
+  }
+
+  if (isPublicMarketRoute(pathname, method)) {
+    return null;
+  }
+
+  if (!isOwnerControlPlaneRoute(pathname)) {
+    return null;
+  }
+
+  return requireOwnerRequest(request, env, {
+    allow_options: true,
+    drain_body_on_denial: true
+  });
+}
+
+export function assertOwnerAuthorized(
+  request: Request,
+  env?: AdminAuthEnv
+): AdminAuthResult {
+  const result = authorizeOwnerRequest(request, env);
+
+  if (!result.authorized) {
+    throw new Error('AUTH_REQUIRED');
+  }
+
+  return result;
+}

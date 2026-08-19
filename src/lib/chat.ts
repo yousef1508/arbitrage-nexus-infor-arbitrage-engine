@@ -1,4 +1,4 @@
-import type { Message, ChatState, ToolCall, WeatherResult, MCPResult, ErrorResult } from '../../worker/types';
+﻿import type { Message, ChatState, ToolCall, WeatherResult, MCPResult, ErrorResult } from '../../worker/types';
 export interface ChatResponse {
   success: boolean;
   data?: ChatState;
@@ -54,7 +54,7 @@ class ChatService {
   }
   async getMessages(): Promise<ChatResponse> {
     try {
-      const response = await fetch(`${this.baseUrl}/messages`);
+      const response = await fetch(`${this.baseUrl}/api/system/messages`);
       return await response.json();
     } catch (error) {
       return { success: false, error: 'Load failed' };
@@ -77,9 +77,9 @@ class ChatService {
 export const chatService = new ChatService();
 export const renderToolCall = (toolCall: ToolCall): string => {
   const result = toolCall.result as WeatherResult | MCPResult | ErrorResult | undefined;
-  if (!result || typeof result !== 'object') return `🔧 ${toolCall.name}: Pending`;
-  if ('error' in result) return `❌ ${toolCall.name}: Error`;
-  if ('condition' in result) return `🌤️ ${result.location}: ${result.temperature}°C`;
-  if ('content' in result) return `🔧 ${toolCall.name}: Executed`;
-  return `🔧 ${toolCall.name}: Completed`;
+  if (!result || typeof result !== 'object') return `ðŸ”§ ${toolCall.name}: Pending`;
+  if ('error' in result) return `âŒ ${toolCall.name}: Error`;
+  if ('condition' in result) return `ðŸŒ¤ï¸ ${result.location}: ${result.temperature}Â°C`;
+  if ('content' in result) return `ðŸ”§ ${toolCall.name}: Executed`;
+  return `ðŸ”§ ${toolCall.name}: Completed`;
 };

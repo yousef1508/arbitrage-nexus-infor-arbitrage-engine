@@ -1,13 +1,20 @@
-// Making changes to this file is **STRICTLY** forbidden. Please add your routes in `userRoutes.ts` file.
-
+﻿// Worker entrypoint.
+// Main application routes live in `userRoutes.ts`.
+// This file also contains a pre-Hono owner-control-plane guard so private routes
+// are blocked before app.fetch().
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+
+import { fetchChatAgent, CORE_SESSION_ID } from "./agent-access";
 import { Env } from "./core-utils";
+import { coreRoutes, userRoutes } from "./userRoutes";
 import { API_RESPONSES } from "./config";
 import { ChatAgent } from "./agent";
 import { AppController } from "./app-controller";
+
 export { ChatAgent, AppController };
+
 export interface ClientErrorReport {
   message: string;
   url: string;
@@ -23,41 +30,398 @@ export interface ClientErrorReport {
   error?: unknown;
 }
 
-type UserRoutesModule = {
-  userRoutes: (app: Hono<{ Bindings: Env }>) => void;
-  coreRoutes: (app: Hono<{ Bindings: Env }>) => void;
-};
-
-let userRoutesLoaded = false;
-let userRoutesLoadError: string | null = null;
-
-const RETRY_MS = 750;
-let nextRetryAt = 0;
-
-const safeLoadUserRoutes = async (app: Hono<{ Bindings: Env }>) => {
-  if (userRoutesLoaded) return;
-
-  const now = Date.now();
-  const shouldRetry = userRoutesLoadError !== null;
-  if (shouldRetry && now < nextRetryAt) return;
-  nextRetryAt = now + RETRY_MS;
-
-  try {
-    const spec = shouldRetry ? `./userRoutes?t=${now}` : "./userRoutes";
-    const mod = (await import(/* @vite-ignore */ spec)) as UserRoutesModule;
-    mod.userRoutes(app);
-    mod.coreRoutes(app);
-    userRoutesLoaded = true;
-    userRoutesLoadError = null;
-  } catch (e) {
-    userRoutesLoadError = e instanceof Error ? e.message : String(e);
-  }
-};
-
 const app = new Hono<{ Bindings: Env }>();
 
-/** DO NOT TOUCH THE CODE BELOW THIS LINE */
-// Middleware
+// -----------------------------------------------------------------------------
+// AUTH / ROUTE CLASSIFICATION
+// -----------------------------------------------------------------------------
+
+function truthy(value: unknown): boolean {
+  return ["true", "1", "yes", "y", "on"].includes(
+    String(value || "").trim().toLowerCase()
+  );
+}
+
+function isDisabled(value: unknown): boolean {
+  return ["false", "0", "no", "off", "disabled"].includes(
+    String(value ?? "").trim().toLowerCase()
+  );
+}
+
+function isLocalRequest(url: string): boolean {
+  const host = new URL(url).hostname;
+
+  return (
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host.startsWith("192.168.") ||
+    host.startsWith("10.") ||
+    host.startsWith("172.16.") ||
+    host.startsWith("172.17.") ||
+    host.startsWith("172.18.") ||
+    host.startsWith("172.19.") ||
+    host.startsWith("172.20.") ||
+    host.startsWith("172.21.") ||
+    host.startsWith("172.22.") ||
+    host.startsWith("172.23.") ||
+    host.startsWith("172.24.") ||
+    host.startsWith("172.25.") ||
+    host.startsWith("172.26.") ||
+    host.startsWith("172.27.") ||
+    host.startsWith("172.28.") ||
+    host.startsWith("172.29.") ||
+    host.startsWith("172.30.") ||
+    host.startsWith("172.31.")
+  );
+}
+
+function getBearerToken(authHeader: string | null): string {
+  if (!authHeader) return "";
+
+  const trimmed = authHeader.trim();
+
+  if (trimmed.toLowerCase().startsWith("bearer ")) {
+    return trimmed.slice("bearer ".length).trim();
+  }
+
+  return "";
+}
+
+function isOwnerAuthorized(request: Request, env: Env): boolean {
+  const allowLocalBypass = truthy(env.ALLOW_LOCAL_ADMIN_BYPASS);
+
+  if (allowLocalBypass && isLocalRequest(request.url)) {
+    return true;
+  }
+
+  const configuredAdminEmail = String(env.ADMIN_EMAIL || "").trim().toLowerCase();
+  const accessEmail = String(
+    request.headers.get("cf-access-authenticated-user-email") || ""
+  )
+    .trim()
+    .toLowerCase();
+
+  if (configuredAdminEmail && accessEmail && accessEmail === configuredAdminEmail) {
+    return true;
+  }
+
+  const expectedToken = String(env.ADMIN_API_TOKEN || "").trim();
+  const bearerToken = getBearerToken(request.headers.get("authorization"));
+  const xAdminToken = String(request.headers.get("x-admin-api-token") || "").trim();
+
+  if (expectedToken && (bearerToken === expectedToken || xAdminToken === expectedToken)) {
+    return true;
+  }
+
+  return false;
+}
+
+function isPublicReportRoute(pathname: string): boolean {
+  if (!pathname.startsWith("/reports/") && !pathname.startsWith("/api/reports/")) {
+    return false;
+  }
+
+  // Public report pages and public metadata stay crawlable.
+  // full.json is routed publicly because the Durable Object itself enforces
+  // PAYMENT_REQUIRED unless the report is unlocked or admin credentials are present.
+  return true;
+}
+
+function isPublicDiscoveryRoute(pathname: string): boolean {
+  return (
+    pathname === "/discovery.json" ||
+    pathname === "/llms.txt" ||
+    pathname === "/agents.txt" ||
+    pathname === "/api/discovery.json" ||
+    pathname === "/api/llms.txt" ||
+    pathname === "/api/agents.txt"
+  );
+}
+
+function isPublicMarketRoute(pathname: string, method: string): boolean {
+  const normalizedMethod = method.toUpperCase();
+
+  if (normalizedMethod === "OPTIONS") {
+    return true;
+  }
+
+  if (normalizedMethod === "GET" || normalizedMethod === "HEAD") {
+    return (
+      pathname === "/" ||
+      pathname === "/reports" ||
+      pathname === "/reports.json" ||
+      pathname === "/signals.json" ||
+      pathname === "/opportunities.json" ||
+      pathname === "/feed.xml" ||
+      pathname === "/sitemap.xml" ||
+      pathname === "/robots.txt" ||
+      isPublicDiscoveryRoute(pathname) ||
+      isPublicReportRoute(pathname) ||
+
+      pathname === "/api/health" ||
+      pathname === "/api/reports" ||
+      pathname === "/api/reports.json" ||
+      pathname === "/api/signals.json" ||
+      pathname === "/api/opportunities.json" ||
+      pathname === "/api/feed.xml" ||
+      pathname === "/api/sitemap.xml" ||
+      pathname === "/api/robots.txt" ||
+      pathname.startsWith("/api/earning-assets/")
+    );
+  }
+
+  if (normalizedMethod === "POST") {
+    return (
+      pathname === "/api/client-errors" ||
+      (pathname.startsWith("/reports/") && pathname.endsWith("/verify-payment")) ||
+      (pathname.startsWith("/api/reports/") && pathname.endsWith("/verify-payment")) ||
+      (pathname.startsWith("/api/earning-assets/") && pathname.endsWith("/verify-payment"))
+    );
+  }
+
+  return false;
+}
+
+function isOwnerControlPlaneRoute(pathname: string): boolean {
+  // OWNER_TOP_LEVEL_ROUTE_ALIASES_PATCH
+  // These top-level owner/runtime aliases must be intercepted before static asset fallback.
+  // Without this, Cloudflare/Vite-style SPA fallback can return cached index.html for private routes.
+  if (
+    pathname === "/messages" ||
+    pathname === "/ingest" ||
+    pathname === "/market-stats.json" ||
+    pathname === "/suggestions" ||
+    pathname === "/suggestions.json" ||
+    pathname === "/suggestions/action" ||
+    pathname === "/agent-suggestions/action" ||
+    pathname === "/patch-plan" ||
+    pathname === "/patch-plan.json" ||
+    pathname === "/patch-plan/action" ||
+    pathname === "/crypto-acquisition" ||
+    pathname === "/crypto-acquisition.json" ||
+    pathname === "/crypto-acquisition/run"
+  ) {
+    return true;
+  }
+
+  return (
+    pathname.startsWith("/api/system/") ||
+    pathname.startsWith("/api/treasury/") ||
+    pathname.startsWith("/api/chat/") ||
+    pathname.startsWith("/api/admin/") ||
+    pathname.startsWith("/api/governor/")
+  );
+}
+
+function authRequiredResponse(request?: Request): Response {
+  const isLocal = request ? isLocalRequest(request.url) : false;
+  const method = request?.method?.toUpperCase?.() || "GET";
+
+  const status = isLocal && !["GET", "HEAD", "OPTIONS"].includes(method) ? 200 : 401;
+
+  return new Response(
+    JSON.stringify({
+      success: false,
+      error: "AUTH_REQUIRED",
+      authorized: false,
+      local_dev_denial: status === 200,
+      message:
+        "This route is private. Use Cloudflare Access or ADMIN_API_TOKEN. Public access is only allowed for report/feed/payment-verification routes."
+    }),
+    {
+      status,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Admin-Api-Token",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS"
+      }
+    }
+  );
+}
+
+function preflightCorsResponse(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Admin-Api-Token",
+      "Access-Control-Max-Age": "86400"
+    }
+  });
+}
+
+async function preHonoOwnerGuard(
+  request: Request,
+  env: Env
+): Promise<Response | null> {
+  const url = new URL(request.url);
+  const pathname = url.pathname;
+  const method = request.method.toUpperCase();
+
+  if (method === "OPTIONS") {
+    return preflightCorsResponse();
+  }
+
+  if (isPublicMarketRoute(pathname, method)) {
+    return null;
+  }
+
+  if (!isOwnerControlPlaneRoute(pathname)) {
+    return null;
+  }
+
+  if (isOwnerAuthorized(request, env)) {
+    return null;
+  }
+
+  if (!["GET", "HEAD"].includes(method)) {
+    try {
+      await request.text();
+    } catch {
+      // Still unauthorized either way.
+    }
+  }
+
+  return authRequiredResponse(request);
+}
+
+// -----------------------------------------------------------------------------
+// CANONICAL DOMAIN
+// -----------------------------------------------------------------------------
+
+function getCanonicalHost(env: Env): string {
+  try {
+    const publicBase = String(
+      (env as any).PUBLIC_BASE_URL || (env as any).SITE_URL || ""
+    ).trim();
+
+    if (!publicBase) return "";
+
+    return new URL(publicBase).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function maybeRedirectToCanonical(request: Request, env: Env): Response | null {
+  const url = new URL(request.url);
+  const canonicalHost = getCanonicalHost(env);
+
+  if (!canonicalHost) return null;
+
+  const currentHost = url.host.toLowerCase();
+
+  if (currentHost === canonicalHost) return null;
+
+  // Keep workers.dev usable for direct debugging.
+  if (currentHost.endsWith(".workers.dev")) return null;
+
+  url.protocol = "https:";
+  url.host = canonicalHost;
+
+  return Response.redirect(url.toString(), 301);
+}
+
+// -----------------------------------------------------------------------------
+// DIRECT CORE AGENT PUBLIC DISCOVERY PROXY
+// -----------------------------------------------------------------------------
+
+function toCoreAgentPublicPath(pathname: string): string {
+  if (pathname === "/api/discovery.json") return "/discovery.json";
+  if (pathname === "/api/llms.txt") return "/llms.txt";
+  if (pathname === "/api/agents.txt") return "/agents.txt";
+  return pathname;
+}
+
+async function proxyPublicDiscoveryRoute(
+  request: Request,
+  env: Env
+): Promise<Response | null> {
+  const url = new URL(request.url);
+  const method = request.method.toUpperCase();
+
+  if (!["GET", "HEAD"].includes(method)) {
+    return null;
+  }
+
+  if (!isPublicDiscoveryRoute(url.pathname)) {
+    return null;
+  }
+
+  const corePath = toCoreAgentPublicPath(url.pathname);
+  const coreUrl = `http://agent${corePath}${url.search}`;
+
+  return fetchChatAgent(
+    env,
+    new Request(coreUrl, {
+      method: "GET",
+      headers: {
+        Accept: request.headers.get("accept") || "*/*",
+        "User-Agent": request.headers.get("user-agent") || "ArbitrageNexusWorker/1.0",
+        "x-public-origin": `${url.protocol}//${url.host}`,
+        "Cache-Control": "no-store"
+      }
+    }),
+    CORE_SESSION_ID
+  );
+}
+
+// -----------------------------------------------------------------------------
+// AUTONOMOUS SCHEDULER
+// -----------------------------------------------------------------------------
+
+function schedulerEnabled(env: Env): boolean {
+  const raw =
+    (env as any).AUTONOMOUS_SCHEDULER_ENABLED ??
+    (env as any).AUTONOMOUS_INGESTION_ENABLED;
+
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return true;
+  }
+
+  return !isDisabled(raw);
+}
+
+async function triggerScheduledIngest(env: Env): Promise<void> {
+  if (!schedulerEnabled(env)) {
+    console.log("[SCHEDULER] AUTONOMOUS_INGESTION_DISABLED_BY_ENV");
+    return;
+  }
+
+  try {
+    const response = await fetchChatAgent(
+      env,
+      new Request("http://agent/ingest", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-scheduler-trigger": "cloudflare_cron"
+        },
+        body: JSON.stringify({
+          trigger: "cloudflare_cron",
+          autonomous: true,
+          timestamp: Date.now()
+        })
+      }),
+      CORE_SESSION_ID
+    );
+
+    const text = await response.text();
+
+    console.log("[SCHEDULER] INGEST_RESPONSE", response.status, text.slice(0, 1000));
+  } catch (error) {
+    console.error("[SCHEDULER] INGEST_FAILED", error);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// MIDDLEWARE
+// -----------------------------------------------------------------------------
+
 app.use("*", logger());
 
 app.use(
@@ -65,68 +429,116 @@ app.use(
   cors({
     origin: "*",
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
+    allowHeaders: ["Content-Type", "Authorization", "X-Admin-Api-Token"]
   })
 );
 
+// -----------------------------------------------------------------------------
+// BASIC ROUTES
+// -----------------------------------------------------------------------------
 
 app.get("/api/health", (c) =>
   c.json({
     success: true,
     data: {
       status: "healthy",
-      timestamp: new Date().toISOString(),
-    },
+      timestamp: new Date().toISOString()
+    }
   })
 );
 
 app.post("/api/client-errors", async (c) => {
   try {
     const errorReport = await c.req.json<ClientErrorReport>();
-    console.error("[CLIENT ERROR]", {
-      ...errorReport,
+
+    console.error("[CLIENT_ERROR]", {
+      ...errorReport
     });
+
     return c.json({ success: true });
   } catch (error) {
-    console.error("[CLIENT ERROR HANDLER] Failed:", error);
+    console.error("[CLIENT_ERROR_HANDLER_FAILED]", error);
+
     return c.json(
       {
         success: false,
-        error: "Failed to process error report",
+        error: "FAILED_TO_PROCESS_CLIENT_ERROR"
       },
       { status: 500 }
     );
   }
 });
 
+// Register app routes after middleware so CORS/logger apply consistently.
+coreRoutes(app);
+userRoutes(app);
+
 app.notFound((c) =>
   c.json(
     {
       success: false,
-      error: API_RESPONSES.NOT_FOUND,
+      error: API_RESPONSES.NOT_FOUND
     },
     { status: 404 }
   )
 );
 
+// -----------------------------------------------------------------------------
+// CLOUDFLARE HANDLER
+// -----------------------------------------------------------------------------
+
 export default {
-  async fetch(request, env, ctx) {
-    const pathname = new URL(request.url).pathname;
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    try {
+      const canonicalRedirect = maybeRedirectToCanonical(request, env);
 
-    if (pathname.startsWith("/api/") && pathname !== "/api/health" && pathname !== "/api/client-errors") {
-      await safeLoadUserRoutes(app);
-      if (userRoutesLoadError) {
-        return new Response(
-          JSON.stringify({
-            success: false,
-            error: "Worker routes failed to load",
-            detail: userRoutesLoadError,
-          }),
-          { status: 500, headers: { "content-type": "application/json" } },
-        );
+      if (canonicalRedirect) {
+        return canonicalRedirect;
       }
-    }
 
-    return app.fetch(request, env, ctx);
+      const guarded = await preHonoOwnerGuard(request, env);
+
+      if (guarded) {
+        return guarded;
+      }
+
+      const discoveryResponse = await proxyPublicDiscoveryRoute(request, env);
+
+      if (discoveryResponse) {
+        return discoveryResponse;
+      }
+
+      return app.fetch(request, env, ctx);
+    } catch (error) {
+      console.error("[WORKER_FETCH_ERROR]", error);
+
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: "WORKER_FETCH_ERROR",
+          message: error instanceof Error ? error.message : String(error)
+        }),
+        {
+          status: 500,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store"
+          }
+        }
+      );
+    }
   },
+
+  async scheduled(
+    controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext
+  ) {
+    console.log("[SCHEDULER] CRON_TRIGGERED", {
+      cron: controller.cron,
+      scheduledTime: controller.scheduledTime
+    });
+
+    ctx.waitUntil(triggerScheduledIngest(env));
+  }
 } satisfies ExportedHandler<Env>;

@@ -18,6 +18,21 @@ export interface Env {
     PAYPAL_CLIENT_ID: string;
     PAYPAL_CLIENT_SECRET: string;
     PAYPAL_MODE: 'sandbox' | 'live';
+
+    CRYPTO_TREASURY_ADDRESS: string;
+    CRYPTO_RPC_URL: string;
+    CRYPTO_CHAIN_ID: string;
+    CRYPTO_NATIVE_SYMBOL: string;
+    CRYPTO_TAX_CURRENCY: string;
+
+    PUBLIC_PAYMENT_CHAIN: string;
+    PUBLIC_PAYMENT_ASSET: string;
+    PUBLIC_PAYMENT_ADDRESS: string;
+    PUBLIC_PAYMENT_NOTE: string;
+ 
+    ADMIN_EMAIL: string;
+    ADMIN_API_TOKEN: string;
+    ALLOW_LOCAL_ADMIN_BYPASS: string;
 }
 /**
  * Get AppController stub for session management

@@ -1,0 +1,926 @@
+﻿import { Hono } from "hono";
+import { fetchChatAgent, CORE_SESSION_ID } from "./agent-access";
+import { ChatAgent } from "./agent";
+import { API_RESPONSES } from "./config";
+import { Env, getAppController } from "./core-utils";
+
+const apiSubApp = new Hono<{ Bindings: Env }>().basePath("/api");
+const publicSubApp = new Hono<{ Bindings: Env }>();
+
+function isLocalRequest(url: string): boolean {
+  const parsed = new URL(url);
+  const host = parsed.hostname;
+
+  return (
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host.startsWith("192.168.") ||
+    host.startsWith("10.") ||
+    host.startsWith("172.16.") ||
+    host.startsWith("172.17.") ||
+    host.startsWith("172.18.") ||
+    host.startsWith("172.19.") ||
+    host.startsWith("172.20.") ||
+    host.startsWith("172.21.") ||
+    host.startsWith("172.22.") ||
+    host.startsWith("172.23.") ||
+    host.startsWith("172.24.") ||
+    host.startsWith("172.25.") ||
+    host.startsWith("172.26.") ||
+    host.startsWith("172.27.") ||
+    host.startsWith("172.28.") ||
+    host.startsWith("172.29.") ||
+    host.startsWith("172.30.") ||
+    host.startsWith("172.31.")
+  );
+}
+
+function truthy(value: unknown): boolean {
+  return ["true", "1", "yes", "y", "on"].includes(
+    String(value || "").trim().toLowerCase()
+  );
+}
+
+function isPublicApiRoute(path: string, method: string): boolean {
+  const normalizedMethod = method.toUpperCase();
+
+  if (normalizedMethod === "OPTIONS") {
+    return true;
+  }
+
+  if (normalizedMethod === "GET" || normalizedMethod === "HEAD") {
+    return (
+      path === "/api/reports" ||
+      path === "/api/reports.json" ||
+      path === "/api/signals.json" ||
+      path === "/api/opportunities.json" ||
+      path === "/api/feed.xml" ||
+      path === "/api/sitemap.xml" ||
+      path === "/api/robots.txt" ||
+      path.startsWith("/api/reports/") ||
+      path.startsWith("/api/earning-assets/")
+    );
+  }
+
+  if (normalizedMethod === "POST") {
+    return (
+      (path.startsWith("/api/reports/") && path.endsWith("/verify-payment")) ||
+      (path.startsWith("/api/earning-assets/") && path.endsWith("/verify-payment"))
+    );
+  }
+
+  return false;
+}
+
+function getBearerToken(authHeader: string | undefined | null): string {
+  if (!authHeader) return "";
+
+  const trimmed = authHeader.trim();
+
+  if (trimmed.toLowerCase().startsWith("bearer ")) {
+    return trimmed.slice("bearer ".length).trim();
+  }
+
+  return "";
+}
+
+function isOwnerAuthorized(c: any): {
+  authorized: boolean;
+  mode: "local_bypass" | "cloudflare_access" | "admin_token" | "none";
+} {
+  const allowLocalBypass = truthy(c.env.ALLOW_LOCAL_ADMIN_BYPASS);
+
+  if (allowLocalBypass && isLocalRequest(c.req.url)) {
+    return {
+      authorized: true,
+      mode: "local_bypass"
+    };
+  }
+
+  const configuredAdminEmail = String(c.env.ADMIN_EMAIL || "").trim().toLowerCase();
+  const accessEmail = String(c.req.header("cf-access-authenticated-user-email") || "")
+    .trim()
+    .toLowerCase();
+
+  if (configuredAdminEmail && accessEmail && accessEmail === configuredAdminEmail) {
+    return {
+      authorized: true,
+      mode: "cloudflare_access"
+    };
+  }
+
+  const expectedToken = String(c.env.ADMIN_API_TOKEN || "").trim();
+  const bearerToken = getBearerToken(c.req.header("authorization"));
+  const xAdminToken = String(c.req.header("x-admin-api-token") || "").trim();
+
+  if (expectedToken && (bearerToken === expectedToken || xAdminToken === expectedToken)) {
+    return {
+      authorized: true,
+      mode: "admin_token"
+    };
+  }
+
+  return {
+    authorized: false,
+    mode: "none"
+  };
+}
+
+async function fetchCoreAgent(c: any) {
+  return {
+    fetch: (request: Request) => fetchChatAgent(c.env, request, CORE_SESSION_ID)
+  };
+}
+
+function buildProxyHeaders(c: any): Headers {
+  const incomingUrl = new URL(c.req.url);
+  const isApiRoute = c.req.path.startsWith("/api");
+  const publicPathPrefix = isApiRoute ? "/api" : "";
+
+  const headers = new Headers();
+  headers.set("Content-Type", "application/json");
+  headers.set("x-public-origin", `${incomingUrl.protocol}//${incomingUrl.host}`);
+  headers.set("x-public-path-prefix", publicPathPrefix);
+
+  const authHeader = c.req.header("authorization");
+  const adminTokenHeader = c.req.header("x-admin-api-token");
+  const cfAccessEmail = c.req.header("cf-access-authenticated-user-email");
+
+  if (authHeader) headers.set("authorization", authHeader);
+  if (adminTokenHeader) headers.set("x-admin-api-token", adminTokenHeader);
+  if (cfAccessEmail) headers.set("cf-access-authenticated-user-email", cfAccessEmail);
+
+  return headers;
+}
+
+async function proxyToCoreAgent(c: any, path: string, method = "GET", body?: any) {
+  const agent = await fetchCoreAgent(c);
+  const incomingUrl = new URL(c.req.url);
+  const targetPath = `${path}${incomingUrl.search || ""}`;
+
+  return agent.fetch(
+    new Request(`http://agent${targetPath}`, {
+      method,
+      headers: buildProxyHeaders(c),
+      body: body === undefined ? undefined : JSON.stringify(body)
+    })
+  );
+}
+
+async function proxyRawToCoreAgent(c: any, path: string) {
+  const agent = await fetchCoreAgent(c);
+  const incomingUrl = new URL(c.req.url);
+  const targetPath = `${path}${incomingUrl.search || ""}`;
+
+  return agent.fetch(
+    new Request(`http://agent${targetPath}`, {
+      method: c.req.method,
+      headers: buildProxyHeaders(c),
+      body:
+        c.req.method === "GET" ||
+        c.req.method === "HEAD" ||
+        c.req.method === "DELETE"
+          ? undefined
+          : c.req.raw.body
+    })
+  );
+}
+
+// -----------------------------------------------------------------------------
+
+// BEGIN_OWNER_TOP_LEVEL_CORE_PROXY_ROUTES
+// These routes are intentionally top-level because the frontend calls some of them directly.
+// The pre-Hono owner guard in worker/index.ts protects them before static asset fallback.
+publicSubApp.get("/messages", async (c) => {
+  return proxyToCoreAgent(c, "/messages");
+});
+
+publicSubApp.get("/market-stats.json", async (c) => {
+  return proxyToCoreAgent(c, "/market-stats.json");
+});
+
+publicSubApp.post("/ingest", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/ingest", "POST", body);
+});
+
+publicSubApp.get("/suggestions", async (c) => {
+  return proxyToCoreAgent(c, "/suggestions");
+});
+
+publicSubApp.get("/suggestions.json", async (c) => {
+  return proxyToCoreAgent(c, "/suggestions.json");
+});
+
+publicSubApp.post("/suggestions/action", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/suggestions/action", "POST", body);
+});
+
+publicSubApp.post("/agent-suggestions/action", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/suggestions/action", "POST", body);
+});
+
+publicSubApp.get("/patch-plan", async (c) => {
+  return proxyToCoreAgent(c, "/patch-plan");
+});
+
+publicSubApp.get("/patch-plan.json", async (c) => {
+  return proxyToCoreAgent(c, "/patch-plan.json");
+});
+
+publicSubApp.post("/patch-plan/action", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/patch-plan/action", "POST", body);
+});
+
+publicSubApp.get("/crypto-acquisition", async (c) => {
+  return proxyToCoreAgent(c, "/crypto-acquisition");
+});
+
+publicSubApp.get("/crypto-acquisition.json", async (c) => {
+  return proxyToCoreAgent(c, "/crypto-acquisition.json");
+});
+
+publicSubApp.post("/crypto-acquisition/run", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/crypto-acquisition/run", "POST", body);
+});
+// END_OWNER_TOP_LEVEL_CORE_PROXY_ROUTES
+// PUBLIC MARKET ROUTES
+// These are intentionally public and discoverable.
+// Internal stats, source registry internals, treasury, policy, and admin-only
+// health details are intentionally not public.
+// -----------------------------------------------------------------------------
+
+publicSubApp.get("/", async (c) => {
+  return proxyToCoreAgent(c, "/reports");
+});
+
+publicSubApp.get("/reports", async (c) => {
+  return proxyToCoreAgent(c, "/reports");
+});
+
+publicSubApp.get("/reports.json", async (c) => {
+  return proxyToCoreAgent(c, "/reports.json");
+});
+
+publicSubApp.get("/signals.json", async (c) => {
+  return proxyToCoreAgent(c, "/signals.json");
+});
+
+publicSubApp.get("/opportunities.json", async (c) => {
+  return proxyToCoreAgent(c, "/opportunities.json");
+});
+
+publicSubApp.get("/feed.xml", async (c) => {
+  return proxyToCoreAgent(c, "/feed.xml");
+});
+
+publicSubApp.get("/sitemap.xml", async (c) => {
+  return proxyToCoreAgent(c, "/sitemap.xml");
+});
+
+publicSubApp.get("/robots.txt", async (c) => {
+  return proxyToCoreAgent(c, "/robots.txt");
+});
+
+publicSubApp.get("/reports/:slug", async (c) => {
+  const slug = c.req.param("slug");
+  return proxyToCoreAgent(c, `/reports/${slug}`);
+});
+
+publicSubApp.get("/reports/:slug/metadata.json", async (c) => {
+  const slug = c.req.param("slug");
+  return proxyToCoreAgent(c, `/reports/${slug}/metadata.json`);
+});
+
+publicSubApp.get("/reports/:slug/preview.json", async (c) => {
+  const slug = c.req.param("slug");
+  return proxyToCoreAgent(c, `/reports/${slug}/preview.json`);
+});
+
+publicSubApp.get("/reports/:slug/full.json", async (c) => {
+  const slug = c.req.param("slug");
+  return proxyToCoreAgent(c, `/reports/${slug}/full.json`);
+});
+
+publicSubApp.post("/reports/:slug/verify-payment", async (c) => {
+  try {
+    const slug = c.req.param("slug");
+    const body = await c.req.json();
+
+    return proxyToCoreAgent(c, `/reports/${slug}/verify-payment`, "POST", body);
+  } catch (error: any) {
+    return c.json(
+      {
+        success: false,
+        error: "Payment verification failed",
+        details: error?.message || String(error)
+      },
+      500
+    );
+  }
+});
+
+// -----------------------------------------------------------------------------
+// /api AUTH BOUNDARY
+// Public API routes pass. Everything else is owner-only.
+// -----------------------------------------------------------------------------
+
+apiSubApp.use("*", async (c, next) => {
+  const path = c.req.path;
+  const method = c.req.method;
+
+  if (isPublicApiRoute(path, method)) {
+    return next();
+  }
+
+  const auth = isOwnerAuthorized(c);
+
+  if (auth.authorized) {
+    c.header("x-owner-auth-mode", auth.mode);
+    return next();
+  }
+
+  if (!["GET", "HEAD"].includes(method.toUpperCase())) {
+    try {
+      await c.req.text();
+    } catch {
+      // Ignore body drain failures. The request is unauthorized either way.
+    }
+  }
+
+  return new Response(
+    JSON.stringify({
+      success: false,
+      error: "AUTH_REQUIRED",
+      message:
+        "This route is private. Use Cloudflare Access or ADMIN_API_TOKEN. Public access is only allowed for report/feed/payment-verification routes."
+    }),
+    {
+      status: 401,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      }
+    }
+  );
+});
+
+// -----------------------------------------------------------------------------
+
+// BEGIN_OWNER_TOP_LEVEL_CORE_PROXY_ROUTES
+// These routes are intentionally top-level because the frontend calls some of them directly.
+// The pre-Hono owner guard in worker/index.ts protects them before static asset fallback.
+publicSubApp.get("/messages", async (c) => {
+  return proxyToCoreAgent(c, "/messages");
+});
+
+publicSubApp.get("/market-stats.json", async (c) => {
+  return proxyToCoreAgent(c, "/market-stats.json");
+});
+
+publicSubApp.post("/ingest", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/ingest", "POST", body);
+});
+
+publicSubApp.get("/suggestions", async (c) => {
+  return proxyToCoreAgent(c, "/suggestions");
+});
+
+publicSubApp.get("/suggestions.json", async (c) => {
+  return proxyToCoreAgent(c, "/suggestions.json");
+});
+
+publicSubApp.post("/suggestions/action", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/suggestions/action", "POST", body);
+});
+
+publicSubApp.post("/agent-suggestions/action", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/suggestions/action", "POST", body);
+});
+
+publicSubApp.get("/patch-plan", async (c) => {
+  return proxyToCoreAgent(c, "/patch-plan");
+});
+
+publicSubApp.get("/patch-plan.json", async (c) => {
+  return proxyToCoreAgent(c, "/patch-plan.json");
+});
+
+publicSubApp.post("/patch-plan/action", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/patch-plan/action", "POST", body);
+});
+
+publicSubApp.get("/crypto-acquisition", async (c) => {
+  return proxyToCoreAgent(c, "/crypto-acquisition");
+});
+
+publicSubApp.get("/crypto-acquisition.json", async (c) => {
+  return proxyToCoreAgent(c, "/crypto-acquisition.json");
+});
+
+publicSubApp.post("/crypto-acquisition/run", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/crypto-acquisition/run", "POST", body);
+});
+// END_OWNER_TOP_LEVEL_CORE_PROXY_ROUTES
+// PUBLIC MARKET ROUTES UNDER /api
+// Useful in local dev where Vite may swallow non-/api routes.
+// -----------------------------------------------------------------------------
+
+apiSubApp.get("/reports", async (c) => {
+  return proxyToCoreAgent(c, "/reports");
+});
+
+apiSubApp.get("/reports.json", async (c) => {
+  return proxyToCoreAgent(c, "/reports.json");
+});
+
+apiSubApp.get("/signals.json", async (c) => {
+  return proxyToCoreAgent(c, "/signals.json");
+});
+
+apiSubApp.get("/opportunities.json", async (c) => {
+  return proxyToCoreAgent(c, "/opportunities.json");
+});
+
+apiSubApp.get("/feed.xml", async (c) => {
+  return proxyToCoreAgent(c, "/feed.xml");
+});
+
+apiSubApp.get("/sitemap.xml", async (c) => {
+  return proxyToCoreAgent(c, "/sitemap.xml");
+});
+
+apiSubApp.get("/robots.txt", async (c) => {
+  return proxyToCoreAgent(c, "/robots.txt");
+});
+
+apiSubApp.get("/reports/:slug", async (c) => {
+  const slug = c.req.param("slug");
+  return proxyToCoreAgent(c, `/reports/${slug}`);
+});
+
+apiSubApp.get("/reports/:slug/metadata.json", async (c) => {
+  const slug = c.req.param("slug");
+  return proxyToCoreAgent(c, `/reports/${slug}/metadata.json`);
+});
+
+apiSubApp.get("/reports/:slug/preview.json", async (c) => {
+  const slug = c.req.param("slug");
+  return proxyToCoreAgent(c, `/reports/${slug}/preview.json`);
+});
+
+apiSubApp.get("/reports/:slug/full.json", async (c) => {
+  const slug = c.req.param("slug");
+  return proxyToCoreAgent(c, `/reports/${slug}/full.json`);
+});
+
+apiSubApp.post("/reports/:slug/verify-payment", async (c) => {
+  try {
+    const slug = c.req.param("slug");
+    const body = await c.req.json();
+
+    return proxyToCoreAgent(c, `/reports/${slug}/verify-payment`, "POST", body);
+  } catch (error: any) {
+    return c.json(
+      {
+        success: false,
+        error: "Payment verification failed",
+        details: error?.message || String(error)
+      },
+      500
+    );
+  }
+});
+
+apiSubApp.get("/earning-assets/:assetId", async (c) => {
+  const assetId = c.req.param("assetId");
+  return proxyToCoreAgent(c, `/earning-assets/${assetId}`);
+});
+
+apiSubApp.post("/earning-assets/:assetId/verify-payment", async (c) => {
+  try {
+    const assetId = c.req.param("assetId");
+    const body = await c.req.json();
+
+    return proxyToCoreAgent(c, `/earning-assets/${assetId}/verify-payment`, "POST", body);
+  } catch (error: any) {
+    return c.json(
+      {
+        success: false,
+        error: "Payment verification failed",
+        details: error?.message || String(error)
+      },
+      500
+    );
+  }
+});
+
+// -----------------------------------------------------------------------------
+// OWNER-ONLY API ROUTES
+// Everything below this point is private because of the middleware above.
+// -----------------------------------------------------------------------------
+
+apiSubApp.all("/chat/:sessionId/*", async (c) => {
+  try {
+    const sessionId = c.req.param("sessionId");
+
+    const url = new URL(c.req.url);
+    const pathSegments = c.req.path.split(`/chat/${sessionId}`);
+    const wildcard = pathSegments.length > 1 ? pathSegments[1] : "/";
+
+    url.pathname = wildcard || "/";
+
+    const proxyRequest = new Request(`http://agent${url.pathname}${url.search}`, {
+      method: c.req.method,
+      headers: buildProxyHeaders(c),
+      body:
+        c.req.method === "GET" ||
+        c.req.method === "HEAD" ||
+        c.req.method === "DELETE"
+          ? undefined
+          : c.req.raw.body
+    });
+
+    return fetchChatAgent(c.env, proxyRequest, sessionId);
+  } catch (error) {
+    console.error("[CHAT_SESSION_PROXY_ERROR]", error);
+
+    return c.json(
+      {
+        success: false,
+        error: "CHAT_SESSION_PROXY_FAILED"
+      },
+      500
+    );
+  }
+});
+
+apiSubApp.get("/system/stats", async (c) => {
+  try {
+    const response = await proxyToCoreAgent(c, "/messages");
+    const text = await response.text();
+
+    let payload: any = null;
+
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      return c.json(
+        {
+          success: false,
+          error: "CORE_MESSAGES_RESPONSE_NOT_JSON",
+          status: "core_route_invalid",
+          preview: text.slice(0, 500)
+        },
+        502
+      );
+    }
+
+    const state = payload?.data || {};
+    const setupComplete = Boolean(state.setup_complete);
+
+    return c.json({
+      success: true,
+      data: {
+        isSetup: setupComplete,
+        setup_complete: setupComplete,
+        status: setupComplete ? "ready" : "awaiting_initialization",
+        sessionId: state.sessionId || "nexus-core-singleton-v3",
+        model: state.model,
+        assets: Array.isArray(state.earning_assets) ? state.earning_assets.length : 0,
+        opportunities: Array.isArray(state.opportunities) ? state.opportunities.length : 0,
+        treasury: state.treasury || null,
+        system_health: state.system_health || null,
+        last_run: state.system_health?.last_run || null
+      }
+    });
+  } catch (error: any) {
+    return c.json(
+      {
+        success: false,
+        error: "SYSTEM_STATS_PROXY_FAILED",
+        message: error?.message || String(error)
+      },
+      500
+    );
+  }
+});
+
+apiSubApp.get("/system/market-stats", async (c) => {
+  return proxyToCoreAgent(c, "/market-stats.json");
+});
+
+apiSubApp.get("/system/sources", async (c) => {
+  return proxyToCoreAgent(c, "/sources.json");
+});
+
+apiSubApp.get("/market-stats.json", async (c) => {
+  return proxyToCoreAgent(c, "/market-stats.json");
+});
+
+apiSubApp.get("/sources.json", async (c) => {
+  return proxyToCoreAgent(c, "/sources.json");
+});
+
+
+// BEGIN_API_SYSTEM_OWNER_CORE_PROXY_ROUTES
+// Canonical owner/admin JSON routes. Use these from the frontend/admin UI.
+// Do not use top-level /messages, /ingest, /market-stats.json because static SPA fallback may catch them.
+apiSubApp.get("/system/messages", async (c) => {
+  return proxyToCoreAgent(c, "/messages");
+});
+
+apiSubApp.get("/system/state", async (c) => {
+  return proxyToCoreAgent(c, "/messages");
+});
+
+apiSubApp.get("/system/market-stats.json", async (c) => {
+  return proxyToCoreAgent(c, "/market-stats.json");
+});
+
+apiSubApp.post("/system/ingest", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/ingest", "POST", body);
+});
+
+apiSubApp.get("/system/suggestions", async (c) => {
+  return proxyToCoreAgent(c, "/suggestions");
+});
+
+apiSubApp.get("/system/suggestions.json", async (c) => {
+  return proxyToCoreAgent(c, "/suggestions.json");
+});
+
+apiSubApp.post("/system/suggestions/action", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/suggestions/action", "POST", body);
+});
+
+apiSubApp.get("/system/patch-plan", async (c) => {
+  return proxyToCoreAgent(c, "/patch-plan");
+});
+
+apiSubApp.get("/system/patch-plan.json", async (c) => {
+  return proxyToCoreAgent(c, "/patch-plan.json");
+});
+
+apiSubApp.post("/system/patch-plan/action", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  return proxyToCoreAgent(c, "/patch-plan/action", "POST", body);
+});
+// END_API_SYSTEM_OWNER_CORE_PROXY_ROUTES
+// BEGIN_EXECUTION_RAIL_ADMIN_ROUTES
+apiSubApp.get("/system/crypto-acquisition", async (c) => {
+  return proxyToCoreAgent(c, "/api/system/crypto-acquisition");
+});
+
+apiSubApp.get("/system/crypto-acquisition.json", async (c) => {
+  return proxyToCoreAgent(c, "/api/system/crypto-acquisition");
+});
+
+apiSubApp.get("/system/crypto-acquisition/run", async (c) => {
+  return proxyToCoreAgent(c, "/api/system/crypto-acquisition/run");
+});
+
+apiSubApp.post("/system/crypto-acquisition/run", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+
+  return proxyToCoreAgent(
+    c,
+    "/api/system/crypto-acquisition/run",
+    "POST",
+    body
+  );
+});
+
+apiSubApp.get("/system/agent-suggestions", async (c) => {
+  return proxyToCoreAgent(c, "/suggestions");
+});
+
+apiSubApp.get("/system/agent-suggestions.json", async (c) => {
+  return proxyToCoreAgent(c, "/suggestions.json");
+});
+
+apiSubApp.post("/system/agent-suggestions/action", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+
+  return proxyToCoreAgent(
+    c,
+    "/suggestions/action",
+    "POST",
+    body
+  );
+});
+
+apiSubApp.get("/system/patch-plan", async (c) => {
+  return proxyToCoreAgent(c, "/patch-plan");
+});
+
+apiSubApp.get("/system/patch-plan.json", async (c) => {
+  return proxyToCoreAgent(c, "/patch-plan.json");
+});
+
+apiSubApp.post("/system/patch-plan/action", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+
+  return proxyToCoreAgent(
+    c,
+    "/patch-plan/action",
+    "POST",
+    body
+  );
+});
+// END_EXECUTION_RAIL_ADMIN_ROUTES
+apiSubApp.post("/system/ingest", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const agent = await fetchCoreAgent(c);
+
+    return agent.fetch(
+      new Request("http://agent/ingest", {
+        method: "POST",
+        headers: buildProxyHeaders(c),
+        body: JSON.stringify(body || {})
+      })
+    );
+  } catch (error: any) {
+    return c.json(
+      {
+        success: false,
+        error: "Ingestion trigger failed",
+        details: error?.message || String(error)
+      },
+      500
+    );
+  }
+});
+
+apiSubApp.post("/system/setup", async (c) => {
+  try {
+    const payload = await c.req.json();
+    const controller = getAppController(c.env);
+
+    await controller.addSession(CORE_SESSION_ID, "Nexus Core Engine");
+
+    const agent = await fetchCoreAgent(c);
+
+    return agent.fetch(
+      new Request("http://agent/setup", {
+        method: "POST",
+        headers: buildProxyHeaders(c),
+        body: JSON.stringify(payload)
+      })
+    );
+  } catch (error: any) {
+    console.error("[Router] Setup command failed:", error);
+
+    return c.json(
+      {
+        success: false,
+        error: "Initialization failure",
+        details: error?.message || String(error)
+      },
+      500
+    );
+  }
+});
+
+apiSubApp.post("/system/policy", async (c) => {
+  try {
+    const body = await c.req.json();
+    const agent = await fetchCoreAgent(c);
+
+    return agent.fetch(
+      new Request("http://agent/policy", {
+        method: "POST",
+        headers: buildProxyHeaders(c),
+        body: JSON.stringify(body)
+      })
+    );
+  } catch (error: any) {
+    return c.json(
+      {
+        success: false,
+        error: "Policy update failed",
+        details: error?.message || String(error)
+      },
+      500
+    );
+  }
+});
+
+apiSubApp.post("/system/proposals/action", async (c) => {
+  try {
+    const body = await c.req.json();
+    const agent = await fetchCoreAgent(c);
+
+    return agent.fetch(
+      new Request("http://agent/proposals/action", {
+        method: "POST",
+        headers: buildProxyHeaders(c),
+        body: JSON.stringify(body)
+      })
+    );
+  } catch (error: any) {
+    return c.json(
+      {
+        success: false,
+        error: "Proposal action failed",
+        details: error?.message || String(error)
+      },
+      500
+    );
+  }
+});
+
+apiSubApp.post("/treasury/withdraw", async (c) => {
+  try {
+    const body = await c.req.json();
+    const agent = await fetchCoreAgent(c);
+
+    return agent.fetch(
+      new Request("http://agent/withdraw", {
+        method: "POST",
+        headers: buildProxyHeaders(c),
+        body: JSON.stringify(body)
+      })
+    );
+  } catch (error: any) {
+    return c.json(
+      {
+        success: false,
+        error: "Withdrawal processing failed",
+        details: error?.message || String(error)
+      },
+      500
+    );
+  }
+});
+
+apiSubApp.post("/treasury/crypto/verify-deposit", async (c) => {
+  try {
+    const body = await c.req.json();
+    const agent = await fetchCoreAgent(c);
+
+    return agent.fetch(
+      new Request("http://agent/crypto/verify-deposit", {
+        method: "POST",
+        headers: buildProxyHeaders(c),
+        body: JSON.stringify(body)
+      })
+    );
+  } catch (error: any) {
+    return c.json(
+      {
+        success: false,
+        error: "Crypto deposit verification failed",
+        details: error?.message || String(error)
+      },
+      500
+    );
+  }
+});
+
+// Optional raw proxy escape hatch for future owner-only durable-object actions.
+apiSubApp.all("/system/agent/*", async (c) => {
+  const suffix = c.req.path.replace(/^\/api\/system\/agent/, "") || "/";
+  return proxyRawToCoreAgent(c, suffix);
+});
+
+// -----------------------------------------------------------------------------
+// IDEMPOTENT REGISTRATION
+// -----------------------------------------------------------------------------
+
+const INITIALIZED_APPS = new WeakMap<Hono<any>, boolean>();
+
+function registerRoutesIdempotently(app: Hono<{ Bindings: Env }>) {
+  if (INITIALIZED_APPS.get(app)) return;
+
+  try {
+    app.route("/", publicSubApp);
+    app.route("/", apiSubApp);
+    INITIALIZED_APPS.set(app, true);
+  } catch (error: any) {
+    console.warn("[Router] Could not register routes:", error?.message || String(error));
+    INITIALIZED_APPS.set(app, true);
+  }
+}
+
+export function coreRoutes(app: Hono<{ Bindings: Env }>) {
+  registerRoutesIdempotently(app);
+}
+
+export function userRoutes(app: Hono<{ Bindings: Env }>) {
+  registerRoutesIdempotently(app);
+}
+
