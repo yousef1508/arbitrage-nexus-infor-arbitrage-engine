@@ -1,126 +1,134 @@
 # Arbitrage Nexus
 
-**A self-directed project built solo, end to end: autonomous data pipeline,
-AI-agent orchestration, and blockchain payment verification, running on
-Cloudflare's edge platform.**
+**Et selvstendig prosjekt bygget fra bunnen av, alene: automatisert
+datapipeline, AI-agent-orkestrering og blockchain-betalingsverifisering,
+kjørende på Cloudflares edge-plattform.**
 
-[GitHub](#) · [Live case study / notes below](#) — *(add links here)*
-
----
-
-## What this is, in plain terms
-
-Arbitrage Nexus is a system I designed and built that runs on its own: it
-watches free public sources (Hacker News, GitHub Trending, security
-advisories, research feeds, and more), turns what it finds into structured
-intelligence reports, publishes them publicly in both human- and
-machine-readable form, and can accept and verify cryptocurrency payments
-on-chain to unlock the full report — without a human doing the selling.
-
-I'm including it here because it's the clearest example I have of how I
-actually build things: pick a hard, multi-part problem, learn whatever stack
-it needs, and get a working system running end to end rather than a demo of
-one piece.
+[GitHub](#) · [Live demo / notater under](#) — *(legg inn lenker her)*
 
 ---
 
-## Why this is relevant to the role
+## Hva dette er, enkelt forklart
 
-The Aquafind ad asks for someone who's a generalist, picks up new tools
-fast, uses AI as a real part of their workflow rather than just for
-autocomplete, takes initiative instead of waiting for a fully specified
-task, and can explain technical decisions to people who aren't technical.
-This project is the evidence for all of that, concretely:
+Arbitrage Nexus er et system jeg har designet og bygget som kjører helt på
+egen hånd: det følger med på gratis, offentlige kilder (Hacker News, GitHub
+Trending, sikkerhetsvarsler, forskningsfeeder, med mer), gjør det den finner
+om til strukturerte etterretningsrapporter, publiserer dem offentlig i både
+menneske- og maskinlesbart format, og kan ta imot og verifisere
+kryptobetalinger direkte på blockchainen for å låse opp hele rapporten —
+uten at et menneske selger noe manuelt.
 
-| What you're looking for | Where it shows up here |
+Jeg tar det med her fordi det er det klareste eksempelet jeg har på hvordan
+jeg faktisk bygger ting: velger et vanskelig problem med mange deler, lærer
+det jeg trenger av ny teknologi underveis, og får et fungerende system til å
+kjøre fra start til slutt — ikke bare en demo av én enkelt del.
+
+---
+
+## Hvorfor dette er relevant for stillingen
+
+Aquafind-annonsen ber om en generalist som er komfortabel med å sette seg
+raskt inn i nye verktøy, som bruker AI aktivt i arbeidsflyten sin (ikke bare
+til å "spørre om kode"), som tar initiativ i stedet for å vente på en
+ferdig spesifisert oppgave, og som kan forklare tekniske valg til folk som
+ikke er tekniske. Dette prosjektet er beviset på alt dette, konkret:
+
+| Det dere ser etter | Hvor det vises her |
 |---|---|
-| Broad, self-taught tool range | Frontend (React/Vite/Tailwind), backend (Cloudflare Workers, Hono), stateful infra (Durable Objects), on-chain payment verification (raw JSON-RPC calls to Polygon), AI model orchestration — none of which I knew going in |
-| Comfortable jumping into new platforms | Whole stack (Cloudflare Workers/Agents SDK, Durable Objects) was new to me at the start of this project |
-| Uses AI tools to actually solve problems | See "How I used AI" below — not code autocomplete, but a working method for building and auditing a system too large to hold in my head at once |
-| Self-directed, takes initiative | No one assigned this. I scoped it, built it, and — see "Engineering judgment" below — went back and audited my own work critically rather than declaring it done |
-| Explains technical decisions clearly | This README is written so a non-technical reader can follow what the system does and why, not just a technical one |
-| Product-owner mindset, not just execution | The "Known gaps" section exists because I audited my own build against my own original spec and prioritized fixes by actual impact, not by what was easiest |
+| Bred, selvlært verktøykasse | Frontend (React/Vite/Tailwind), backend (Cloudflare Workers, Hono), stateful infrastruktur (Durable Objects), on-chain betalingsverifisering (rå JSON-RPC-kall mot Polygon), AI-modellorkestrering — ingenting av dette kunne jeg fra før |
+| Komfortabel med nye plattformer | Hele stacken (Cloudflare Workers/Agents SDK, Durable Objects) var ny for meg da jeg startet |
+| Bruker AI-verktøy til å faktisk løse problemer | Se "Hvordan jeg brukte AI" under — ikke kode-autofullføring, men en reell metode for å bygge og revidere et system som er for stort til å holde i hodet på egen hånd |
+| Selvstendig, tar initiativ | Ingen ga meg dette som oppgave. Jeg definerte omfanget, bygget det, og — se "Teknisk vurdering" under — gikk selv kritisk gjennom eget arbeid i stedet for å erklære det ferdig |
+| Forklarer tekniske valg tydelig | Denne README-en er skrevet slik at en ikke-teknisk leser kan følge hva systemet gjør og hvorfor, ikke bare en teknisk leser |
+| Tenker som produkteier, ikke bare utfører | "Kjente svakheter"-seksjonen finnes fordi jeg reviderte mitt eget arbeid mot min egen opprinnelige spesifikasjon, og prioriterte det som faktisk betyr noe — ikke det som var enklest å fikse |
 
 ---
 
-## Architecture
+## Arkitektur
 
 ```
-scrape public sources (free, no paid APIs)
-→ detect a signal
-→ synthesize it into a priced intelligence report (AI-assisted)
-→ publish to a public catalog (JSON, RSS, sitemap — for both humans and bots)
-→ buyer pays in crypto (Polygon)
-→ payment verified directly against the blockchain (no third-party processor)
-→ report unlocks
-→ ledger updated (only from confirmed, verified payments — never estimates)
+skrap offentlige kilder (gratis, ingen betalte API-er)
+→ oppdag et signal
+→ syntetiser det til en priset etterretningsrapport (AI-assistert)
+→ publiser i en offentlig katalog (JSON, RSS, sitemap — for både folk og roboter)
+→ kjøper betaler i krypto (Polygon)
+→ betalingen verifiseres direkte mot blockchainen (ingen tredjeparts betalingsløsning)
+→ rapporten låses opp
+→ regnskapet oppdateres (kun fra bekreftede, verifiserte betalinger — aldri estimater)
 ```
 
 - **Frontend**: React + Vite + Tailwind, Shadcn/UI, Zustand, TanStack Query
 - **Backend**: Cloudflare Workers + Hono + Cloudflare Agents SDK
-- **State**: Durable Objects — all signals, reports, and financial state persisted server-side
-- **AI**: a small multi-agent system (Scout finds sources, Analyst prices and structures the opportunity, a Governor enforces hard spend/risk limits agents can't override) with automatic fallback across multiple AI model providers so the system keeps running if one is rate-limited
-- **Payments**: native crypto transactions verified directly via RPC calls — I check transaction status, chain ID, destination address, and confirmation count myself rather than trusting a third-party payment API
+- **Tilstand**: Durable Objects — alle signaler, rapporter og finansiell tilstand lagres server-side
+- **AI**: et lite multi-agent-system (Scout finner kilder, Analyst prissetter og strukturerer muligheten, en Governor håndhever harde grenser for forbruk/risiko som agentene ikke kan overstyre) med automatisk fallback mellom flere AI-modell-leverandører, slik at systemet fortsetter å kjøre selv om én blir rate-limitet
+- **Betaling**: native kryptotransaksjoner verifisert direkte via RPC-kall — jeg sjekker selv transaksjonsstatus, chain-ID, mottakeradresse og antall bekreftelser, i stedet for å stole på et tredjeparts betalings-API
 
 ---
 
-## How I used AI in building this
+## Hvordan jeg brukte AI i byggingen
 
-Not as autocomplete. I used it as a working partner for two different jobs
-in this project:
+Ikke som autofullføring. Jeg brukte det som en reell samarbeidspartner til
+to forskjellige oppgaver i dette prosjektet:
 
-1. **Building** — designing the agent architecture, writing the payment
-   verification logic, working through edge cases in the treasury/ledger
-   design (e.g., making sure projected value could never accidentally get
-   counted as real revenue).
-2. **Auditing my own work** — I had it read through the entire codebase
-   against my original design doc and tell me honestly what was actually
-   built versus what I'd only described. That's where the "Known gaps"
-   section below came from — it caught a gap I'd have otherwise missed
-   (a feed that looked complete but was actually just aliasing another
-   one) and correctly identified which shortcoming was cosmetic versus
-   which one actually mattered for the system to work as intended.
+1. **Bygging** — design av agent-arkitekturen, skriving av
+   betalingsverifiseringslogikken, og arbeid med kantsaker i
+   regnskaps-/treasury-designet (f.eks. å sikre at projisert verdi aldri
+   kunne bli telt som reell inntekt ved en feil).
+2. **Revisjon av eget arbeid** — jeg fikk det til å lese gjennom hele
+   kodebasen opp mot mitt opprinnelige designdokument og fortelle meg
+   ærlig hva som faktisk var bygget versus hva jeg bare hadde beskrevet.
+   Det er derfra "Kjente svakheter"-seksjonen under kommer — den fanget
+   opp et hull jeg ellers ikke hadde sett (en feed som så komplett ut,
+   men som egentlig bare var et alias for en annen), og identifiserte
+   riktig hvilken svakhet som var kosmetisk og hvilken som faktisk hadde
+   betydning for at systemet skulle virke som tiltenkt.
 
-That second use is the one I think matters more day to day: knowing how to
-get a second, critical opinion on your own work from a tool, and knowing
-which of its findings to act on.
-
----
-
-## Engineering judgment: known gaps, ranked by what actually matters
-
-I don't think a "finished, no notes" project is a believable one, so here's
-my own honest assessment, ranked by real impact rather than by what's
-easiest to fix:
-
-1. **Report depth is the real bottleneck.** The AI agent that writes each
-   report currently works from a single source, one pass, capped input.
-   That's the thing most worth improving — connecting signals across
-   multiple sources so the output is genuine synthesis, not a reformatted
-   summary. This is next on my list, ahead of anything cosmetic.
-2. **Source health isn't tracked live.** If a source's page layout changes
-   and scraping silently breaks, nothing surfaces that automatically yet.
-3. **One feed endpoint is currently just an alias of another** rather than
-   its own distinct data layer, per my original spec. Cosmetic — lowest
-   priority of the three.
+Den andre bruksmåten er den jeg tror betyr mest i det daglige: å vite hvordan
+man får en reell, kritisk vurdering av eget arbeid fra et verktøy, og å
+vite hvilke av funnene man faktisk bør handle på.
 
 ---
 
-## Running it locally
+## Teknisk vurdering: kjente svakheter, rangert etter hva som faktisk betyr noe
+
+Jeg tror ikke på et "ferdig, ingen anmerkninger"-prosjekt, så her er min
+egen ærlige vurdering, rangert etter reell betydning — ikke etter hva som
+er enklest å fikse:
+
+1. **Rapportdybden er den egentlige flaskehalsen.** AI-agenten som skriver
+   hver rapport jobber i dag ut fra én enkelt kilde, i én omgang, med
+   begrenset input. Det er det som er mest verdt å forbedre — å koble
+   signaler på tvers av flere kilder slik at resultatet blir ekte syntese,
+   ikke en omformulert oppsummering. Dette er neste post på listen min,
+   foran alt som er kosmetisk.
+2. **Kildehelse spores ikke live.** Hvis en kildes sidestruktur endres og
+   skrapingen svikter stille, dukker det foreløpig ikke automatisk opp
+   noe sted.
+3. **Ett feed-endepunkt er for øyeblikket bare et alias for et annet**,
+   i stedet for et eget, distinkt datalag slik den opprinnelige
+   spesifikasjonen tilsa. Kosmetisk — lavest prioritet av de tre.
+
+---
+
+## Kjøre det lokalt
 
 ```bash
 bun install
-bun run dev          # starts on :3000
+bun run dev          # starter på :3000
 bun run typecheck
 bun run build
 ```
 
-Config lives in a local `.dev.vars` file (not committed) — API keys, the
-treasury wallet address, and AI provider credentials. Not included here for
-obvious reasons.
+Konfigurasjon ligger i en lokal `.dev.vars`-fil (ikke committet) —
+API-nøkler, treasury-lommebokadresse og AI-leverandørcredentials. Ikke
+inkludert her, av åpenbare grunner.
 
 ---
 
-## A note on scope
+## En kommentar om omfang
 
-This isn't a tutorial project — there's no course or template it followed.
+Dette er ikke et kurs- eller malprosjekt — det finnes ingen kurs eller
+mal det er basert på. Betalingsverifiseringslogikken,
+agent-styringsreglene og kravene til regnskapsintegritet er alle valg jeg
+tok selv, og som jeg måtte forsvare overfor meg selv da jeg reviderte
+resultatet.
