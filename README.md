@@ -4,7 +4,7 @@
 datapipeline, AI-agent-orkestrering og blockchain-betalingsverifisering,
 kjørende på Cloudflares edge-plattform.**
 
-[GitHub](#) · [Live demo / notater under](#) — *(legg inn lenker her)*
+[GitHub](https://github.com/yousef1508/arbitrage-nexus-infor-arbitrage-engine) · [Live demo (uten admin)](https://arbitragenexus.net/) — *(legg inn lenker her)*
 
 ---
 
