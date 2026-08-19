@@ -1,229 +1,126 @@
 # Arbitrage Nexus
 
-Personal reference doc. Single-owner, zero-cost, autonomous synthesis-arbitrage
-broker — not a SaaS, not a client-service business, not for anyone but Yousef.
+**A self-directed project built solo, end to end: autonomous data pipeline,
+AI-agent orchestration, and blockchain payment verification, running on
+Cloudflare's edge platform.**
 
-Full vision/constraints/history live in `handoff.md`. This README is the
-practical "what actually exists and how do I run it" doc.
+[GitHub](#) · [Live case study / notes below](#) — *(add links here)*
 
 ---
 
-## What this system does
+## What this is, in plain terms
 
-```
-scrape public sources
-→ detect signal
-→ synthesize into a paid intelligence report
-→ publish to a public, machine-readable catalog
-→ external buyer (human or agent) pays crypto (Polygon POL)
-→ payment verified on-chain
-→ report unlocks
-→ treasury credited (verified revenue only)
-```
+Arbitrage Nexus is a system I designed and built that runs on its own: it
+watches free public sources (Hacker News, GitHub Trending, security
+advisories, research feeds, and more), turns what it finds into structured
+intelligence reports, publishes them publicly in both human- and
+machine-readable form, and can accept and verify cryptocurrency payments
+on-chain to unlock the full report — without a human doing the selling.
 
-The public surface exists only to expose inventory to the outside world.
-Visitors/bots/crawlers/agents are counterparties, not app users. The private
-core (dashboard, treasury, admin routes) is for Yousef only — no accounts,
-no logins for buyers, no multi-tenant anything.
+I'm including it here because it's the clearest example I have of how I
+actually build things: pick a hard, multi-part problem, learn whatever stack
+it needs, and get a working system running end to end rather than a demo of
+one piece.
+
+---
+
+## Why this is relevant to the role
+
+The Aquafind ad asks for someone who's a generalist, picks up new tools
+fast, uses AI as a real part of their workflow rather than just for
+autocomplete, takes initiative instead of waiting for a fully specified
+task, and can explain technical decisions to people who aren't technical.
+This project is the evidence for all of that, concretely:
+
+| What you're looking for | Where it shows up here |
+|---|---|
+| Broad, self-taught tool range | Frontend (React/Vite/Tailwind), backend (Cloudflare Workers, Hono), stateful infra (Durable Objects), on-chain payment verification (raw JSON-RPC calls to Polygon), AI model orchestration — none of which I knew going in |
+| Comfortable jumping into new platforms | Whole stack (Cloudflare Workers/Agents SDK, Durable Objects) was new to me at the start of this project |
+| Uses AI tools to actually solve problems | See "How I used AI" below — not code autocomplete, but a working method for building and auditing a system too large to hold in my head at once |
+| Self-directed, takes initiative | No one assigned this. I scoped it, built it, and — see "Engineering judgment" below — went back and audited my own work critically rather than declaring it done |
+| Explains technical decisions clearly | This README is written so a non-technical reader can follow what the system does and why, not just a technical one |
+| Product-owner mindset, not just execution | The "Known gaps" section exists because I audited my own build against my own original spec and prioritized fixes by actual impact, not by what was easiest |
 
 ---
 
 ## Architecture
 
-- **Frontend**: React + Vite + Tailwind, Shadcn/UI, Zustand, TanStack Query — owner dashboard only.
-- **Backend**: Cloudflare Workers + Hono + Cloudflare Agents SDK.
-- **Persistence**: Durable Objects (`ChatAgent`, `AppController`) hold all state — signals, opportunities, earning assets, treasury, ledger.
-- **AI**: Model-agnostic router with fallback pools (`AI_MODEL_POOL_*` per agent role). Gemini 2.5 Flash Lite is the preferred default to avoid 429s.
-- **Payment**: Native crypto (Polygon POL) sent to a configured treasury address, verified directly against an RPC endpoint. No payment processor, no PayPal dependency for the core loop.
+```
+scrape public sources (free, no paid APIs)
+→ detect a signal
+→ synthesize it into a priced intelligence report (AI-assisted)
+→ publish to a public catalog (JSON, RSS, sitemap — for both humans and bots)
+→ buyer pays in crypto (Polygon)
+→ payment verified directly against the blockchain (no third-party processor)
+→ report unlocks
+→ ledger updated (only from confirmed, verified payments — never estimates)
+```
 
-### Agent roles
-- **Scout** — selects sources per niche and pulls raw content via free `fetch()` (no paid scraping API).
-- **Analyst** — turns one scraped signal into one priced opportunity (JSON), with confidence/novelty/urgency/monetization/risk scores.
-- **Governor** — deterministic policy gate (risk ceiling, daily spend cap, emergency stop). Agents cannot bypass it.
-- **ContentArb** — turns an approved opportunity into an earning asset (the actual report).
-- **Crypto verifier** — validates a submitted tx hash on-chain before anything is credited.
+- **Frontend**: React + Vite + Tailwind, Shadcn/UI, Zustand, TanStack Query
+- **Backend**: Cloudflare Workers + Hono + Cloudflare Agents SDK
+- **State**: Durable Objects — all signals, reports, and financial state persisted server-side
+- **AI**: a small multi-agent system (Scout finds sources, Analyst prices and structures the opportunity, a Governor enforces hard spend/risk limits agents can't override) with automatic fallback across multiple AI model providers so the system keeps running if one is rate-limited
+- **Payments**: native crypto transactions verified directly via RPC calls — I check transaction status, chain ID, destination address, and confirmation count myself rather than trusting a third-party payment API
 
 ---
 
-## Public routes (discoverable, no auth)
+## How I used AI in building this
 
-```
-GET  /                          landing
-GET  /reports                   human-readable catalog
-GET  /reports/:slug              individual report page (locked until paid)
-GET  /reports/:slug/metadata.json
-GET  /reports/:slug/preview.json
-GET  /reports/:slug/full.json    payload, gated by unlock status
-POST /reports/:slug/verify-payment
-GET  /reports.json               full report catalog, machine-readable
-GET  /signals.json               ⚠️ currently an alias of /opportunities.json — see Known Gaps
-GET  /opportunities.json
-GET  /sitemap.xml
-GET  /robots.txt
-GET  /feed.xml                   RSS
-GET  /discovery.json / /llms.txt / /agents.txt   agent-oriented discovery (bonus, not in original spec)
-```
+Not as autocomplete. I used it as a working partner for two different jobs
+in this project:
 
-All of the above are also mirrored under `/api/...`.
+1. **Building** — designing the agent architecture, writing the payment
+   verification logic, working through edge cases in the treasury/ledger
+   design (e.g., making sure projected value could never accidentally get
+   counted as real revenue).
+2. **Auditing my own work** — I had it read through the entire codebase
+   against my original design doc and tell me honestly what was actually
+   built versus what I'd only described. That's where the "Known gaps"
+   section below came from — it caught a gap I'd have otherwise missed
+   (a feed that looked complete but was actually just aliasing another
+   one) and correctly identified which shortcoming was cosmetic versus
+   which one actually mattered for the system to work as intended.
 
-## Private routes (owner only — token or Cloudflare Access)
-
-```
-/api/system/*
-/api/treasury/*
-/api/chat/*
-/api/admin/*
-/api/governor/*
-dashboard UI, agent logs, tax receipts, policy controls, withdrawal controls
-```
-
-Guarded in `worker/admin-auth.ts` via `isOwnerControlPlaneRoute` /
-`isPublicMarketRoute` classification + a pre-route guard in `worker/index.ts`.
-Auth is `ADMIN_API_TOKEN` (bearer or `x-admin-api-token` header) or Cloudflare
-Access email header. `ALLOW_LOCAL_ADMIN_BYPASS` exists for local dev only —
-confirm it's unset/false before anything is ever exposed publicly.
+That second use is the one I think matters more day to day: knowing how to
+get a second, critical opinion on your own work from a tool, and knowing
+which of its findings to act on.
 
 ---
 
-## Local development
+## Engineering judgment: known gaps, ranked by what actually matters
 
-Runtime: **Bun**.
+I don't think a "finished, no notes" project is a believable one, so here's
+my own honest assessment, ranked by real impact rather than by what's
+easiest to fix:
+
+1. **Report depth is the real bottleneck.** The AI agent that writes each
+   report currently works from a single source, one pass, capped input.
+   That's the thing most worth improving — connecting signals across
+   multiple sources so the output is genuine synthesis, not a reformatted
+   summary. This is next on my list, ahead of anything cosmetic.
+2. **Source health isn't tracked live.** If a source's page layout changes
+   and scraping silently breaks, nothing surfaces that automatically yet.
+3. **One feed endpoint is currently just an alias of another** rather than
+   its own distinct data layer, per my original spec. Cosmetic — lowest
+   priority of the three.
+
+---
+
+## Running it locally
 
 ```bash
 bun install
-bun run dev        # vite dev server on :3000
+bun run dev          # starts on :3000
+bun run typecheck
+bun run build
 ```
 
-`.dev.vars` in the project root holds all local secrets/config (see
-`env-vars.md` below). It is already populated locally — **do not commit it,
-do not paste its contents anywhere, and rotate any key that leaves this
-machine.**
-
-Useful commands:
-
-```bash
-bun run typecheck        # tsc --noEmit
-bun run build            # vite build
-bun run verify            # typecheck + build
-bun run deploy            # build + wrangler deploy
-```
-
-PowerShell helpers in `scripts/`:
-- `deploy-production.ps1` — scripted prod deploy
-- `check-production.ps1` — post-deploy smoke checks
-- `set-cloudflare-secrets.ps1` — pushes `.dev.vars` values to Cloudflare secrets
-- `smoke-test.ps1` — hits key routes and checks responses
-
-Local stats / debugging (PowerShell):
-
-```powershell
-$data = Invoke-RestMethod http://localhost:3000/api/system/stats
-$data.data.treasury | ConvertTo-Json -Depth 10
-$data.data.earning_assets | Select-Object -First 1 | ConvertTo-Json -Depth 10
-
-Invoke-WebRequest -Uri http://localhost:3000/api/system/ingest -Method POST | Select-Object -ExpandProperty Content
-
-Invoke-WebRequest -Uri http://localhost:3000/api/treasury/crypto/verify-deposit -Method POST -ContentType "application/json" -Body '{"txHash":"not-a-hash"}'
-```
+Config lives in a local `.dev.vars` file (not committed) — API keys, the
+treasury wallet address, and AI provider credentials. Not included here for
+obvious reasons.
 
 ---
 
-## Environment variables
+## A note on scope
 
-Full values live only in `.dev.vars` (local) / Cloudflare secrets (prod) —
-never in this file. Categories, for reference:
-
-- **Admin/auth**: `ADMIN_API_TOKEN`, `ADMIN_EMAIL`, `ALLOW_LOCAL_ADMIN_BYPASS`
-- **AI routing**: `AI_MODEL`, `AI_MODEL_POOL_*` (per role), `AI_MODEL_ROUTER_ENABLED`, `AI_MAX_REQUESTS_PER_CYCLE`, `AI_MAX_TOKENS_PER_CYCLE`, `AI_MIN_MINUTES_BETWEEN_CYCLES`, backoff/retry settings, `CF_AI_BASE_URL` / `CF_AI_API_KEY` / `CF_AI_MODEL`, `GEMINI_MODEL`, `OPENROUTER_API_KEY`
-- **Crypto payment**: `CRYPTO_RPC_URL`, `CRYPTO_TREASURY_ADDRESS`, `CRYPTO_CHAIN_ID`, `CRYPTO_NATIVE_SYMBOL`, `CRYPTO_NATIVE_DECIMALS`, `CRYPTO_MIN_CONFIRMATIONS`, `CRYPTO_ALLOWED_UNDERPAYMENT_NOK`, price oracle config (`CRYPTO_PRICE_PROVIDER`, `CRYPTO_COINGECKO_ID`, cache/staleness settings, fallback controls)
-- **Public payment mirror**: `PUBLIC_PAYMENT_*` — what's shown to buyers on report pages
-- **Affiliate (optional, not core rail)**: `AFFILIATE_*_URL` / `_LABEL`, `PUBLIC_AFFILIATE_*_URL`, `AFFILIATE_OFFERS_JSON`
-- **PayPal (legacy/optional owner withdrawal path)**: `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_MODE`
-- **Misc**: `SITE_URL`, `PUBLIC_BASE_URL`, `PRODUCTION_MODE`, `AUTONOMOUS_INGESTION_ENABLED`, `SERPAPI_KEY` (only used for query-based search fallback, not the main free-fetch scraping path)
-
-**Security note:** the `.dev.vars` currently in this project has live-looking
-values for `CF_AI_API_KEY`, `ADMIN_API_TOKEN`, `PAYPAL_CLIENT_SECRET`, and
-`CRYPTO_TREASURY_ADDRESS`. If this file or its contents are ever shared,
-uploaded, or pasted anywhere outside this machine, rotate all of them
-immediately.
-
----
-
-## Deployment
-
-Not deployed yet as of this writing (custom domain `arbitragenexus.net` is
-configured in `wrangler.jsonc` but not live/indexed).
-
-**Do not deploy until every item below is true:**
-
-- [x] public/private route boundaries correct and enforced
-- [x] admin/owner routes protected (token or CF Access)
-- [x] clean report slugs (`/reports/:slug`, not raw `/api/earning-assets/:id`)
-- [x] `/reports.json`
-- [ ] `/signals.json` as a *genuine* normalized signal layer (currently aliases `/opportunities.json` — see Known Gaps)
-- [x] `/opportunities.json`
-- [x] `/sitemap.xml`
-- [x] `/robots.txt`
-- [x] `/feed.xml`
-- [x] crypto payment verification works (on-chain, chain-ID checked, treasury-address checked)
-- [x] reused tx hashes are blocked (`TX_HASH_ALREADY_USED`, checked against both earning assets and tax receipts)
-- [x] full payload unlock works
-- [x] treasury only credits verified revenue (`canCreditTreasuryFromVerifiedCryptoReceipt` hard-gates on `status === 'verified'`, `valuation_status === 'final'`, positive NOK value)
-
-To deploy manually once ready:
-
-```bash
-bun run deploy
-# or
-bun run deploy:prod
-```
-
----
-
-## Known gaps (as of last audit)
-
-1. **`/signals.json` is not a real signal layer.** No `Signal` type exists in
-   the codebase — the route just relabels `this.state.opportunities`. The
-   original design called for raw per-signal traceability
-   (`source_id`, `source_name`, `source_url`, `confidence`, `freshness_score`,
-   `tags`) separate from synthesized opportunities. Low priority to fix —
-   cosmetic vs. functional impact.
-
-2. **Source registry has no live health tracking.** `source-registry.ts` is a
-   static array — no `last_checked_at`, `last_success_at`, `last_error`,
-   `health_status` per source. If a source silently breaks (site redesign,
-   UA block), there's no automatic signal of that; only Scout's kernel logs
-   would show it.
-
-3. **Report synthesis is shallow — this is the one that actually matters for
-   revenue.** The Analyst prompt (`worker/agent.ts`, ~line 2245) generates one
-   opportunity from a single scraped snippet (max ~2,200 chars) from a single
-   source, in one pass. There is no cross-source correlation, no
-   competitive/contextual reasoning, no "signal A + signal B implies C."
-   Pricing logic and revenue-honesty constraints in the prompt are solid; the
-   actual informational depth of what gets sold is currently closer to
-   reformatted raw data than genuine synthesis. This is the highest-leverage
-   thing to improve before expecting anyone (human or agent) to pay for a
-   report.
-
-## Things that are already solid (don't re-litigate these)
-
-- Crypto verify-payment flow: proper on-chain checks (tx success, chain ID,
-  treasury address match, hash match, confirmation count), reused-hash
-  rejection, treasury purity gating.
-- Admin/owner route protection.
-- Discovery layer (sitemap/robots/feed + bonus `llms.txt`/`agents.txt` for
-  agent discovery, which wasn't even in the original spec).
-- Treasury/ledger types explicitly separate "projected market value" from
-  "verified revenue" at the type level, not just in application logic.
-
----
-
-## Guardrails (do not drift from these)
-
-- Single-owner only — no customer accounts, no buyer logins, no multi-tenant state.
-- Zero paid dependencies unless explicitly approved.
-- Zero manual input after setup — no manual selling/messaging/publishing.
-- Treasury credits only verified, on-chain-confirmed payments. Projected value is ranking/prioritization data only, never shown as earned revenue.
-- Primary monetization rail is crypto payment/unlock — affiliate links are optional, never the core dependency.
-- Everything private by default; only explicitly listed routes are public.
+This isn't a tutorial project — there's no course or template it followed.
